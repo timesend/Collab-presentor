@@ -23,6 +23,7 @@
 
 
 import io, base64, contextlib, json
+from IPython.utils.capture import capture_output
 from PIL import Image, ImageDraw, ImageFont
 from pygments import lex
 from pygments.lexers import PythonLexer
@@ -112,16 +113,20 @@ def _build_code_pages_from_history(history_entries):
         if not clean_src.strip():
             continue
 
-        buf_out = io.StringIO()
         plt.close("all")
         try:
-            with contextlib.redirect_stdout(buf_out):
+            with capture_output() as cap:
                 exec(clean_src, shared_ns)
         except Exception as e:
             skip_notes.append((i, f"raised {type(e).__name__}: {e}"))
             print(f"Skipped a cell that raised {type(e).__name__}: {e}")
             continue
-        stdout_text = buf_out.getvalue()
+        stdout_text = cap.stdout
+        # cap.outputs holds any display()-published rich objects captured during
+        # replay (ipywidgets, HTML, dataframes, etc.). We don't try to render
+        # these into the slide -- most, like a live slider, can't meaningfully
+        # become a static image -- but capturing them here is what stops them
+        # from leaking into the presenter cell's own visible output instead.
 
         code_img = _render_code_image(src)
         output_img = None
