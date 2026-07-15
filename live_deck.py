@@ -128,6 +128,18 @@ def _build_code_pages_from_history(history_entries):
         # become a static image -- but capturing them here is what stops them
         # from leaking into the presenter cell's own visible output instead.
 
+        # A cell can opt into a genuinely interactive slide (client-side only --
+        # no Python involved after the slide is built) by setting a variable
+        # named _SLIDE_HTML to a self-contained HTML/SVG string. Use inline
+        # event attributes (onclick="...") for any interactivity, not a
+        # separate <script> tag -- browsers don't execute scripts injected via
+        # innerHTML, only inline handlers wired up as part of the markup itself.
+        slide_html = shared_ns.get("_SLIDE_HTML")
+        if isinstance(slide_html, str) and slide_html.strip():
+            code_pages.append({"type": "html", "html": slide_html, "cellId": cell_id})
+            shared_ns.pop("_SLIDE_HTML", None)  # don't leak into later replayed cells
+            continue
+
         code_img = _render_code_image(src)
         output_img = None
         if plt.get_fignums():
@@ -154,7 +166,7 @@ def _build_code_pages_from_history(history_entries):
         buf = io.BytesIO()
         combined.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        code_pages.append({"src": b64, "cellId": cell_id})
+        code_pages.append({"type": "image", "src": b64, "cellId": cell_id})
 
     return code_pages, skip_notes
 
@@ -184,7 +196,7 @@ CODE_PAGES, _skip_notes = _build_code_pages_from_history(_entries)
 print(f"Built {len(CODE_PAGES)} code slide(s) from {len(_entries)} prior cell(s) "
       f"({len(_skip_notes)} skipped).")
 
-_PDF_PAGES = [{"src": p, "cellId": None} for p in (PDF_PAGES if "PDF_PAGES" in dir() else [])]
+_PDF_PAGES = [{"type": "image", "src": p, "cellId": None} for p in (PDF_PAGES if "PDF_PAGES" in dir() else [])]
 ALL_SLIDES = _PDF_PAGES + CODE_PAGES
 print(f"Combined deck: {len(ALL_SLIDES)} slide(s) total "
       f"({len(_PDF_PAGES)} from PDF, {len(CODE_PAGES)} from replayed code).")
@@ -208,6 +220,8 @@ deck_html = f"""
   .thumb.dragging {{ opacity:0.35; }}
   .thumb.drag-over {{ transform: scale(1.03); box-shadow: 0 0 0 3px #2f5d50; }}
   .thumb img {{ width:100%; display:block; aspect-ratio: 16/9; object-fit:cover; pointer-events:none; }}
+  .thumb-html-placeholder {{ width:100%; aspect-ratio: 16/9; background:linear-gradient(135deg,#1f3a5f,#16202c); color:#9cc4ff; display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:0.95em; text-align:center; gap:4px; }}
+  .thumb-html-placeholder span {{ font-size:0.75em; color:#7a93b3; }}
   .thumb-controls {{ display:flex; justify-content:space-between; align-items:center; padding:8px; background:#1a1a1a; gap:6px; }}
   .thumb-controls button {{ background:#2a2a2a; color:#eee; border:none; border-radius:4px; width:34px; height:32px; cursor:pointer; font-size:1em; flex-shrink:0; }}
   .thumb-controls button:disabled {{ opacity:0.25; cursor:not-allowed; }}
@@ -231,6 +245,7 @@ deck_html = f"""
   .present-inner img {{ border-radius:6px; box-shadow:0 6px 24px rgba(0,0,0,0.5); }}
   .present-inner:not(.scrollable) img {{ width:100%; height:100%; object-fit:contain; }}
   .present-inner.scrollable img {{ width:100%; height:auto; display:block; }}
+  #present-html {{ width:100%; height:100%; display:none; overflow:auto; }}
   .scroll-hint {{ position:absolute; bottom:8px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.6); color:#9cc4ff; font-size:0.75em; padding:3px 10px; border-radius:10px; pointer-events:none; opacity:0; transition:opacity 0.2s; }}
   .scroll-hint.visible {{ opacity:1; }}
   .present-counter {{ position: absolute; bottom: 10px; right: 16px; color: #aaa; font-size: 0.85em; }}
@@ -276,7 +291,7 @@ deck_html = f"""
 
   <div id="present-panel">
     <div class="present-box">
-      <div class="present-inner" id="present-inner"><img id="present-img"></div>
+      <div class="present-inner" id="present-inner"><img id="present-img"><div id="present-html"></div></div>
       <div class="scroll-hint" id="scroll-hint">&#8595; scroll for more</div>
       <div class="present-counter" id="present-counter"></div>
       <a class="present-goto-btn" id="present-goto-link" target="_blank" style="display:none;">&#8599; Code cell</a>
@@ -325,6 +340,7 @@ deck_html = f"""
     const presentPanel = document.getElementById('present-panel');
     const presentInner = document.getElementById('present-inner');
     const presentImg = document.getElementById('present-img');
+    const presentHtml = document.getElementById('present-html');
     const scrollHint = document.getElementById('scroll-hint');
     const presentCounter = document.getElementById('present-counter');
     const presentGotoBtn = document.getElementById('present-goto-btn');
@@ -368,7 +384,10 @@ deck_html = f"""
         }}
         editGrid.innerHTML = SLIDES.map((s, i) => `
             <div class="thumb" draggable="true" data-idx="${{i}}">
-                <img src="data:image/png;base64,${{s.src}}">
+                ${{s.type === 'html'
+                    ? `<div class="thumb-html-placeholder">&#9889; Interactive slide<br><span>see Present mode</span></div>`
+                    : `<img src="data:image/png;base64,${{s.src}}">`
+                }}
                 <div class="thumb-controls">
                     <button class="up" ${{i === 0 ? 'disabled' : ''}}>&#8593;</button>
                     <button class="down" ${{i === SLIDES.length - 1 ? 'disabled' : ''}}>&#8595;</button>
@@ -396,6 +415,9 @@ deck_html = f"""
         if (SLIDES.length === 0) {{
             presentCounter.textContent = '0 / 0';
             presentImg.src = '';
+            presentImg.style.display = 'none';
+            presentHtml.style.display = 'none';
+            presentHtml.innerHTML = '';
             presentGotoBtn.classList.remove('visible');
             presentGotoLink.style.display = 'none';
             presentGotoPanel.classList.remove('visible');
@@ -404,23 +426,41 @@ deck_html = f"""
         const s = SLIDES[presentIdx];
         presentInner.classList.remove('scrollable');
         scrollHint.classList.remove('visible');
-        presentImg.onload = function() {{
-            const boxW = presentInner.clientWidth;
-            const boxH = presentInner.clientHeight;
-            const scaleToFit = Math.min(boxW / presentImg.naturalWidth, boxH / presentImg.naturalHeight);
-            // If fitting the whole image would shrink it below ~65% of native
-            // size, text becomes hard to read — fill the width at full scale
-            // instead and let it scroll vertically. A modest shrink (above the
-            // threshold) still reads fine, so those keep the normal letterboxed
-            // fit with no extra scrolling required.
-            const SCALE_THRESHOLD = 0.65;
-            if (scaleToFit < SCALE_THRESHOLD) {{
-                presentInner.classList.add('scrollable');
-                presentInner.scrollTop = 0;
-                updateScrollHint();
-            }}
-        }};
-        presentImg.src = 'data:image/png;base64,' + s.src;
+
+        if (s.type === 'html') {{
+            // Interactive slide: inject directly, no image scaling logic applies.
+            // Clearing first (rather than just overwriting) ensures any previous
+            // slide's interactive DOM/JS state is fully torn down, not left
+            // stacked underneath — important since element ids inside injected
+            // slides aren't guaranteed unique across different slides.
+            presentImg.style.display = 'none';
+            presentImg.src = '';
+            presentHtml.innerHTML = '';
+            presentHtml.style.display = 'block';
+            presentHtml.innerHTML = s.html;
+        }} else {{
+            presentHtml.style.display = 'none';
+            presentHtml.innerHTML = '';
+            presentImg.style.display = 'block';
+            presentImg.onload = function() {{
+                const boxW = presentInner.clientWidth;
+                const boxH = presentInner.clientHeight;
+                const scaleToFit = Math.min(boxW / presentImg.naturalWidth, boxH / presentImg.naturalHeight);
+                // If fitting the whole image would shrink it below ~65% of native
+                // size, text becomes hard to read — fill the width at full scale
+                // instead and let it scroll vertically. A modest shrink (above the
+                // threshold) still reads fine, so those keep the normal letterboxed
+                // fit with no extra scrolling required.
+                const SCALE_THRESHOLD = 0.65;
+                if (scaleToFit < SCALE_THRESHOLD) {{
+                    presentInner.classList.add('scrollable');
+                    presentInner.scrollTop = 0;
+                    updateScrollHint();
+                }}
+            }};
+            presentImg.src = 'data:image/png;base64,' + s.src;
+        }}
+
         presentCounter.textContent = (presentIdx + 1) + ' / ' + SLIDES.length;
         presentGotoPanel.classList.remove('visible'); // close any open panel when the slide changes
 
@@ -576,10 +616,27 @@ deck_html = f"""
             const pres = new window.PptxGenJS();
             pres.layout = 'LAYOUT_16x9';
             const SLIDE_W = 10, SLIDE_H = 5.625;
+            let skippedHtmlCount = 0;
 
             for (let i = 0; i < SLIDES.length; i++) {{
                 exportStatus.textContent = `Building slide ${{i + 1}} / ${{SLIDES.length}}...`;
                 const s = SLIDES[i];
+
+                if (s.type === 'html') {{
+                    // Interactive slides can't be flattened into a static image —
+                    // add a placeholder noting what was here instead of breaking
+                    // the export or silently dropping the slide.
+                    skippedHtmlCount++;
+                    const slide = pres.addSlide();
+                    slide.background = {{ color: '0D0D0F' }};
+                    slide.addText('Interactive slide (not included in export)', {{
+                        x: 0, y: 0, w: SLIDE_W, h: SLIDE_H,
+                        align: 'center', valign: 'middle',
+                        color: '9CC4FF', fontSize: 20,
+                    }});
+                    continue;
+                }}
+
                 const dims = await getImageNaturalSize(s.src);
                 const box = computeLetterbox(dims.w, dims.h, SLIDE_W, SLIDE_H);
                 const slide = pres.addSlide();
@@ -589,7 +646,8 @@ deck_html = f"""
 
             exportStatus.textContent = 'Saving file...';
             await pres.writeFile({{ fileName: 'presentation.pptx' }});
-            exportStatus.textContent = `Done — ${{SLIDES.length}} slide(s) saved as presentation.pptx. Check your downloads.`;
+            const note = skippedHtmlCount > 0 ? ` (${{skippedHtmlCount}} interactive slide(s) added as placeholders)` : '';
+            exportStatus.textContent = `Done — ${{SLIDES.length}} slide(s) saved as presentation.pptx.${{note}} Check your downloads.`;
         }} catch (err) {{
             exportStatus.textContent = 'Export failed: ' + err.message;
         }} finally {{
